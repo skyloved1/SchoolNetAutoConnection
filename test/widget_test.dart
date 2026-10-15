@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:school_net2/main.dart';
+import 'package:school_net_connection/main.dart';
 
 void main() {
   testWidgets('shows campus network login form', (WidgetTester tester) async {

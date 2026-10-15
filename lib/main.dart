@@ -2,13 +2,26 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tray_manager/tray_manager.dart';
+import 'package:window_manager/window_manager.dart';
 
 import 'portal_service.dart';
 
 const targetWifiName = '济宁学院校园网';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+  const windowOptions = WindowOptions(
+    title: '济宁学院校园网',
+    size: Size(520, 760),
+    minimumSize: Size(420, 600),
+    center: true,
+  );
+  await windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.show();
+    await windowManager.focus();
+  });
   runApp(const CampusNetworkApp());
 }
 
@@ -36,7 +49,8 @@ class LoginPage extends StatefulWidget {
   State<LoginPage> createState() => _LoginPageState();
 }
 
-class _LoginPageState extends State<LoginPage> {
+class _LoginPageState extends State<LoginPage>
+    with TrayListener, WindowListener {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
   Timer? _wifiTimer;
@@ -57,7 +71,53 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void initState() {
     super.initState();
+    trayManager.addListener(this);
+    windowManager.addListener(this);
+    _initializeTray();
     _initialize();
+  }
+
+  Future<void> _initializeTray() async {
+    await trayManager.setIcon('assets/app_icon.ico');
+    await trayManager.setToolTip('济宁学院校园网');
+    await trayManager.setContextMenu(
+      Menu(
+        items: [
+          MenuItem(label: '显示主窗口', onClick: (_) => _showWindow()),
+          MenuItem(label: '立即检测并登录', onClick: (_) => _checkWifiAndAutoLogin()),
+          MenuItem(label: '注销', onClick: (_) => _logout()),
+          MenuItem.separator(),
+          MenuItem(label: '退出程序', onClick: (_) => _exitApplication()),
+        ],
+      ),
+    );
+    await windowManager.setPreventClose(true);
+  }
+
+  Future<void> _showWindow() async {
+    await windowManager.show();
+    await windowManager.focus();
+  }
+
+  Future<void> _exitApplication() async {
+    await windowManager.setPreventClose(false);
+    await trayManager.destroy();
+    await windowManager.destroy();
+  }
+
+  @override
+  void onTrayIconMouseDown() {
+    unawaited(_showWindow());
+  }
+
+  @override
+  void onTrayIconRightMouseDown() {
+    unawaited(trayManager.popUpContextMenu());
+  }
+
+  @override
+  void onWindowClose() {
+    windowManager.hide();
   }
 
   Future<void> _initialize() async {
@@ -77,6 +137,8 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void dispose() {
     _wifiTimer?.cancel();
+    trayManager.removeListener(this);
+    windowManager.removeListener(this);
     _usernameController.dispose();
     _passwordController.dispose();
     super.dispose();
