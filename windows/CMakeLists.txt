@@ -72,6 +72,12 @@ endif()
 set(INSTALL_BUNDLE_DATA_DIR "${CMAKE_INSTALL_PREFIX}/data")
 set(INSTALL_BUNDLE_LIB_DIR "${CMAKE_INSTALL_PREFIX}")
 
+# Remove the executable name used by the original Flutter template so a
+# renamed application cannot leave two launchers in the release directory.
+install(CODE "
+  file(REMOVE \"${CMAKE_INSTALL_PREFIX}/school_net2.exe\")
+  " COMPONENT Runtime)
+
 install(TARGETS ${BINARY_NAME} RUNTIME DESTINATION "${CMAKE_INSTALL_PREFIX}"
   COMPONENT Runtime)
 
