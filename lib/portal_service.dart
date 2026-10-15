@@ -1,6 +1,12 @@
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
+
+import 'package:ffi/ffi.dart';
+import 'package:network_info_plus/network_info_plus.dart';
+import 'package:win32/win32.dart';
+import 'package:win32/winsock2.dart';
 
 const portalLoginUrl = 'http://192.168.0.18:801/eportal/portal/login';
 const portalLogoutUrl = 'http://192.168.0.18:801/eportal/portal/logout';
@@ -255,64 +261,78 @@ Future<String> getLocalIPv6() async {
 }
 
 Future<String> getMacForPortalIp(String portalIp) async {
+  return getLocalMac();
+}
+
+Future<String> getLocalMac() async {
+  if (!Platform.isWindows) {
+    throw UnsupportedError('当前通过 Windows API 获取 MAC 仅支持 Windows');
+  }
+
+  final size = calloc<Uint32>();
+  Pointer<IP_ADAPTER_ADDRESSES_LH> addresses = nullptr;
   try {
-    return await getMacForIp(portalIp);
-  } on StateError {
-    // The portal can return an address belonging to another virtual adapter.
-    // Use the active local IPv4 to identify the physical campus-network NIC.
-    return getMacForIp(await getLocalIPv4());
+    var result = GetAdaptersAddresses(
+      AF_UNSPEC,
+      0,
+      nullptr,
+      nullptr,
+      size,
+    );
+    if (result != ERROR_BUFFER_OVERFLOW || size.value == 0) {
+      throw StateError('无法获取 Windows 网卡列表，错误码：$result');
+    }
+    addresses = calloc<Uint8>(size.value).cast<IP_ADAPTER_ADDRESSES_LH>();
+    result = GetAdaptersAddresses(
+      AF_UNSPEC,
+      0,
+      nullptr,
+      addresses,
+      size,
+    );
+    if (result != ERROR_SUCCESS) {
+      throw StateError('无法读取 Windows 网卡信息，错误码：$result');
+    }
+
+    Pointer<IP_ADAPTER_ADDRESSES_LH>? fallback;
+    var current = addresses;
+    while (current != nullptr) {
+      final adapter = current.ref;
+      final physicalAddress = current.cast<Uint8>() + 80;
+      if (adapter.OperStatus == 1 &&
+          adapter.PhysicalAddressLength == 6 &&
+          physicalAddress[0] != 0) {
+        if (adapter.IfType == 71) {
+          return _formatPhysicalAddress(current);
+        }
+        fallback ??= current;
+      }
+      current = adapter.Next;
+    }
+    if (fallback != null) {
+      return _formatPhysicalAddress(fallback);
+    }
+    throw StateError('没有找到已连接的物理网卡 MAC 地址。');
+  } finally {
+    free(size);
+    if (addresses != nullptr) {
+      free(addresses);
+    }
   }
 }
 
-Future<String> getMacForIp(String ip) async {
-  if (!RegExp(r'^\d{1,3}(\.\d{1,3}){3}$').hasMatch(ip)) {
-    throw ArgumentError.value(ip, 'ip', '不是有效的 IPv4 地址');
-  }
-
-  if (!Platform.isWindows) {
-    throw UnsupportedError('当前自动获取 MAC 仅实现了 Windows');
-  }
-
-  const command = r'''
-$adapter = Get-NetIPAddress -IPAddress '__IP__' -ErrorAction SilentlyContinue |
-  ForEach-Object {
-    Get-NetAdapter -InterfaceIndex $_.InterfaceIndex -ErrorAction SilentlyContinue
-  } |
-  Where-Object { $_.Status -eq 'Up' -and $_.MacAddress } |
-  Select-Object -First 1 -ExpandProperty MacAddress
-if ($adapter) { $adapter }
-''';
-
-  final result = await Process.run(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      command.replaceFirst('__IP__', ip),
-    ],
+String _formatPhysicalAddress(Pointer<IP_ADAPTER_ADDRESSES_LH> pointer) {
+  final adapter = pointer.ref;
+  // PhysicalAddress follows the fixed header fields at offset 80 on Windows
+  // x64 (the target architecture of Flutter Windows builds).
+  final physicalAddress = pointer.cast<Uint8>() + 80;
+  final value = List<int>.generate(
+    adapter.PhysicalAddressLength,
+    (index) => physicalAddress[index],
   );
-
-  if (result.exitCode != 0) {
-    throw ProcessException(
-      'powershell.exe',
-      const [],
-      '获取网卡 MAC 失败：${result.stderr}',
-      result.exitCode,
-    );
-  }
-
-  final output = result.stdout.toString().trim();
-  if (output.isEmpty) {
-    throw StateError(
-      '没有找到 IPv4 $ip 对应的已连接网卡。'
-      '请确认 IP 正确，或手动传入 MAC。',
-    );
-  }
-
-  return _normalizeMac(output.split(RegExp(r'\r?\n')).first.trim());
+  return _normalizeMac(value
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join());
 }
 
 String _normalizeMac(String value) {
@@ -350,34 +370,29 @@ bool isLoginSuccess(Map<String, dynamic> result) {
 }
 
 Future<String> getCurrentWifiName() async {
-  if (!Platform.isWindows) {
-    throw UnsupportedError('当前 Wi-Fi 检测仅实现了 Windows');
+  final wifiName = await NetworkInfo().getWifiName();
+  return _repairWifiName(wifiName?.trim() ?? '');
+}
+
+String _repairWifiName(String value) {
+  if (value.isEmpty || value.codeUnits.any((unit) => unit > 0xff)) {
+    return value;
   }
 
-  final result = await Process.run(
-    'powershell.exe',
-    [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-Command',
-      r'''
-$profile = netsh wlan show interfaces
-$match = $profile | Select-String '^\s*SSID\s*:\s*(.+)$' | Select-Object -First 1
-if ($match) { $match.Matches[0].Groups[1].Value.Trim() }
-''',
-    ],
-  );
-  if (result.exitCode != 0) {
-    throw ProcessException(
-      'powershell.exe',
-      const [],
-      '读取 Wi-Fi 名称失败：${result.stderr}',
-      result.exitCode,
-    );
+  final bytes = value.codeUnits;
+  try {
+    final repaired = utf8.decode(bytes);
+    if (_containsReplacementCharacter(repaired)) {
+      return value;
+    }
+    return repaired;
+  } on FormatException {
+    return value;
   }
-  return result.stdout.toString().trim();
+}
+
+bool _containsReplacementCharacter(String value) {
+  return value.contains('\uFFFD');
 }
 
 Future<void> setWindowsStartup(bool enabled) async {
