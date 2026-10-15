@@ -53,6 +53,7 @@ class _LoginPageState extends State<LoginPage>
     with TrayListener, WindowListener {
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _detectionIntervalController = TextEditingController(text: '1');
   Timer? _wifiTimer;
   SharedPreferences? _preferences;
   String _wifiName = '正在检测...';
@@ -64,9 +65,11 @@ class _LoginPageState extends State<LoginPage>
   bool _autoLogin = true;
   bool _autoStart = false;
   bool _loopDetection = true;
+  int _detectionIntervalMinutes = 1;
   bool _obscurePassword = true;
   bool _loggedIn = false;
   bool _autoLoginInProgress = false;
+  bool _exiting = false;
 
   @override
   void initState() {
@@ -100,9 +103,14 @@ class _LoginPageState extends State<LoginPage>
   }
 
   Future<void> _exitApplication() async {
-    await windowManager.setPreventClose(false);
+    if (_exiting) return;
+    _exiting = true;
+
+    // Let the native tray menu callback return before closing the window.
+    await Future<void>.delayed(const Duration(milliseconds: 50));
     await trayManager.destroy();
-    await windowManager.destroy();
+    await windowManager.setPreventClose(false);
+    await windowManager.close();
   }
 
   @override
@@ -117,6 +125,7 @@ class _LoginPageState extends State<LoginPage>
 
   @override
   void onWindowClose() {
+    if (_exiting) return;
     windowManager.hide();
   }
 
@@ -129,6 +138,12 @@ class _LoginPageState extends State<LoginPage>
     _autoLogin = preferences.getBool('autoLogin') ?? true;
     _autoStart = preferences.getBool('autoStart') ?? false;
     _loopDetection = preferences.getBool('loopDetection') ?? true;
+    _detectionIntervalMinutes =
+        preferences.getInt('detectionIntervalMinutes') ?? 1;
+    if (_detectionIntervalMinutes < 1) {
+      _detectionIntervalMinutes = 1;
+    }
+    _detectionIntervalController.text = '$_detectionIntervalMinutes';
     setState(() => _status = '等待 Wi-Fi 连接');
     await _checkWifiAndAutoLogin();
     _updateWifiTimer();
@@ -141,6 +156,7 @@ class _LoginPageState extends State<LoginPage>
     windowManager.removeListener(this);
     _usernameController.dispose();
     _passwordController.dispose();
+    _detectionIntervalController.dispose();
     super.dispose();
   }
 
@@ -215,10 +231,30 @@ class _LoginPageState extends State<LoginPage>
     _wifiTimer?.cancel();
     _wifiTimer = _loopDetection
         ? Timer.periodic(
-            const Duration(seconds: 10),
+            Duration(minutes: _detectionIntervalMinutes),
             (_) => _checkWifiAndAutoLogin(),
           )
         : null;
+  }
+
+  Future<void> _saveDetectionInterval() async {
+    final minutes = int.tryParse(_detectionIntervalController.text.trim());
+    if (minutes == null || minutes < 1) {
+      if (mounted) {
+        setState(() => _status = '检测间隔必须是大于等于 1 的整数分钟');
+      }
+      return;
+    }
+
+    final preferences =
+        _preferences ?? await SharedPreferences.getInstance();
+    await preferences.setInt('detectionIntervalMinutes', minutes);
+    _preferences = preferences;
+    _detectionIntervalMinutes = minutes;
+    _updateWifiTimer();
+    if (mounted) {
+      setState(() => _status = '检测间隔已设置为 $minutes 分钟');
+    }
   }
 
   Future<void> _login({bool auto = false}) async {
@@ -392,9 +428,29 @@ class _LoginPageState extends State<LoginPage>
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('循环检测 Wi-Fi'),
-                  subtitle: const Text('开启后每 10 秒检测一次并按设置自动登录'),
+                  subtitle: Text(
+                    '开启后每 $_detectionIntervalMinutes 分钟检测一次并按设置自动登录',
+                  ),
                   value: _loopDetection,
                   onChanged: _busy ? null : _setLoopDetection,
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _detectionIntervalController,
+                  enabled: !_busy,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: '循环检测间隔（分钟）',
+                    hintText: '请输入大于等于 1 的整数',
+                    prefixIcon: Icon(Icons.timer_outlined),
+                    border: OutlineInputBorder(),
+                  ),
+                  onSubmitted: (_) => _saveDetectionInterval(),
+                ),
+                const SizedBox(height: 8),
+                OutlinedButton(
+                  onPressed: _busy ? null : _saveDetectionInterval,
+                  child: const Text('保存检测间隔'),
                 ),
                 const SizedBox(height: 8),
                 FilledButton.icon(
