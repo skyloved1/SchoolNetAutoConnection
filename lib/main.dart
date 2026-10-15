@@ -120,7 +120,18 @@ class _LoginPageState extends State<LoginPage>
 
   @override
   void onTrayIconRightMouseDown() {
-    unawaited(trayManager.popUpContextMenu());
+    unawaited(_showTrayMenu());
+  }
+
+  Future<void> _showTrayMenu() async {
+    final wasVisible = await windowManager.isVisible();
+    // Windows requires the owner window to be foreground for outside clicks
+    // to dismiss TrackPopupMenu correctly.
+    // ignore: deprecated_member_use
+    await trayManager.popUpContextMenu(bringAppToFront: true);
+    if (!wasVisible && !_exiting) {
+      await windowManager.hide();
+    }
   }
 
   @override
